@@ -1,0 +1,18 @@
+stages:
+  generate:
+    cmd: python -m quoteiq_ml.synthetic
+    deps:
+      - quoteiq_ml/synthetic.py
+    outs:
+      - datasets/synthetic_dev.csv
+  validate:
+    cmd: python -m quoteiq_ml.validate
+    deps:
+      - datasets/synthetic_dev.csv
+  train:
+    cmd: python -m quoteiq_ml.train
+    deps:
+      - datasets/synthetic_dev.csv
+      - quoteiq_ml/train.py
+    outs:
+      - artifacts/metadata.json

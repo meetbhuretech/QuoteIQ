@@ -1,0 +1,146 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quoteiq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quoteiq}
+      POSTGRES_DB: ${POSTGRES_DB:-quoteiq}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quoteiq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment: &backend-env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quoteiq}:${POSTGRES_PASSWORD:-quoteiq}@postgres:5432/${POSTGRES_DB:-quoteiq}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      PROCESS_INLINE: "false"
+      PROCESS_SYNC: "false"
+      STORAGE_DIR: /app/storage
+      MODEL_ARTIFACT_DIR: /opt/quoteiq/ml/artifacts
+      CORS_ORIGINS: http://localhost:3000
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./ml:/opt/quoteiq/ml
+      - storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment: *backend-env
+    command: celery -A app.workers.celery_app:celery worker --loglevel=INFO
+    volumes:
+      - ./backend:/app
+      - ./ml:/opt/quoteiq/ml
+      - storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - frontend-modules:/app/node_modules
+    depends_on:
+      - backend
+
+  mlflow:
+    profiles: ["mlops"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////data/mlflow.db --default-artifact-root /data/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/data
+
+  airflow:
+    profiles: ["mlops"]
+    build:
+      context: .
+      dockerfile: pipelines/Dockerfile
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-quoteiq}:${POSTGRES_PASSWORD:-quoteiq}@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW_USER: ${AIRFLOW_USER:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-change-me}
+      PYTHONPATH: /opt/quoteiq/ml
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create --username $$AIRFLOW_USER --password $$AIRFLOW_PASSWORD --firstname Quote --lastname IQ --role Admin --email admin@quoteiq.local || true &&
+      airflow webserver --port 8080 &
+      airflow scheduler"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./pipelines/dags:/opt/airflow/dags
+      - ./ml:/opt/quoteiq/ml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    profiles: ["mlops"]
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    profiles: ["mlops"]
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3001:3000"
+
+volumes:
+  postgres-data:
+  storage:
+  frontend-modules:
+  mlflow-data:

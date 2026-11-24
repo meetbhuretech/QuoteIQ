@@ -1,0 +1,1 @@
+"""QuoteIQ application package."""

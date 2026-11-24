@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: QuoteIQ
+    folder: QuoteIQ
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
